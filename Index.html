@@ -851,6 +851,10 @@ const CAPACITY = 350;
 const STORAGE_KEY = 'aksara2026-participants-v2';
 const WHEEL_COLORS = ['#B5542A','#1E3A38','#A9862F','#3D7A5C','#D98354','#3C5957','#8C6A2F','#2E5450'];
 
+// ===== GOOGLE SHEETS BACKEND =====
+// Ganti URL ini dengan URL Web App hasil deploy Apps Script kamu.
+const APPS_SCRIPT_URL = 'PASTE_URL_APPS_SCRIPT_DI_SINI';
+
 let currentCat = 'ortu';
 let confirmedRecord = null;
 let confirmCategory = null;
@@ -878,14 +882,41 @@ function switchView(name){
   });
 })();
 
-/* ---------- STORAGE HELPERS ---------- */
+/* ---------- STORAGE HELPERS (Google Sheets backend) ---------- */
+function checkBackendConfigured_(){
+  if(APPS_SCRIPT_URL === 'PASTE_URL_APPS_SCRIPT_DI_SINI' || !APPS_SCRIPT_URL){
+    console.error('APPS_SCRIPT_URL belum diisi. Website tidak bisa menyimpan/membaca data sampai URL Apps Script ditempel di kode.');
+    return false;
+  }
+  return true;
+}
 async function getParticipants(){
-  try{ const res = await window.storage.get(STORAGE_KEY, true); return res ? JSON.parse(res.value) : []; }
-  catch(e){ return []; }
+  if(!checkBackendConfigured_()) return [];
+  try{
+    const url = `${APPS_SCRIPT_URL}?action=get&key=${encodeURIComponent(STORAGE_KEY)}`;
+    const res = await fetch(url);
+    const json = await res.json();
+    if(!json.success || !json.value) return [];
+    return JSON.parse(json.value);
+  }catch(e){
+    console.error('getParticipants error:', e);
+    return [];
+  }
 }
 async function saveParticipants(list){
-  try{ await window.storage.set(STORAGE_KEY, JSON.stringify(list), true); return true; }
-  catch(e){ console.error(e); return false; }
+  if(!checkBackendConfigured_()) return false;
+  try{
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoid CORS preflight on Apps Script
+      body: JSON.stringify({ action:'set', key: STORAGE_KEY, value: JSON.stringify(list) })
+    });
+    const json = await res.json();
+    return !!json.success;
+  }catch(e){
+    console.error('saveParticipants error:', e);
+    return false;
+  }
 }
 function genCode(seq){ return 'AKSARA-' + String(seq).padStart(3,'0'); }
 
@@ -1208,9 +1239,14 @@ document.getElementById('ciDoCheckinBtn').addEventListener('click', async ()=>{
     checkinBy = sel.dataset.val;
   }
 
+  const btn = document.getElementById('ciDoCheckinBtn');
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Memproses...';
+
   const list = await getParticipants();
   const idx = list.findIndex(p=>p.code===ciRecord.code);
-  if(idx===-1) return;
+  if(idx===-1){ btn.disabled=false; btn.textContent=origText; return; }
 
   // Re-check against latest data in case of concurrent check-in (race condition guard)
   if(list[idx].category==='ortu' && list[idx].checkedIn && list[idx].checkinBy){
@@ -1222,7 +1258,14 @@ document.getElementById('ciDoCheckinBtn').addEventListener('click', async ()=>{
   list[idx].checkedIn = true;
   list[idx].checkinBy = checkinBy;
   list[idx].checkinTs = Date.now();
-  await saveParticipants(list);
+  const saved = await saveParticipants(list);
+
+  if(!saved){
+    btn.disabled = false;
+    btn.textContent = origText;
+    alert('Gagal menyimpan data. Periksa koneksi internet dan coba lagi.');
+    return;
+  }
 
   document.getElementById('ciConfirmState').classList.remove('show');
   document.getElementById('ciSuccessName').textContent = displayNameForSearch(list[idx]) + (checkinBy ? ` (${checkinBy})` : '');
@@ -1276,34 +1319,48 @@ document.getElementById('btnConfirmReset-guru').addEventListener('click', resetC
 document.getElementById('btnConfirmReset-komite').addEventListener('click', resetConfirmView);
 document.getElementById('btnConfirmDone').addEventListener('click', resetConfirmView);
 
-async function saveConfirm(updateFn){
+async function saveConfirm(updateFn, triggerBtn){
+  const origText = triggerBtn ? triggerBtn.textContent : null;
+  if(triggerBtn){ triggerBtn.disabled = true; triggerBtn.textContent = 'Menyimpan...'; }
+
   const list = await getParticipants();
   const idx = list.findIndex(p=>p.code===confirmedRecord.code);
-  if(idx===-1) return;
+  if(idx===-1){
+    if(triggerBtn){ triggerBtn.disabled=false; triggerBtn.textContent=origText; }
+    return;
+  }
   updateFn(list[idx]);
-  await saveParticipants(list);
+  const saved = await saveParticipants(list);
+
+  if(!saved){
+    if(triggerBtn){ triggerBtn.disabled=false; triggerBtn.textContent=origText; }
+    alert('Gagal menyimpan konfirmasi. Periksa koneksi internet dan coba lagi.');
+    return;
+  }
+
   ['ortu','guru','komite'].forEach(c=>document.getElementById('confirmFoundState-'+c).classList.remove('show'));
   document.getElementById('confirmSavedState').classList.add('show');
+  if(triggerBtn){ triggerBtn.disabled=false; triggerBtn.textContent=origText; }
 }
 
-document.getElementById('submitOrtuConfirm').addEventListener('click', ()=>{
+document.getElementById('submitOrtuConfirm').addEventListener('click', (e)=>{
   const panitiaSel = document.querySelector('#panitiaGroup .radio-pill.active');
   const hadirSel = document.querySelector('#hadirOrtuGroup .radio-pill.active');
   if(!hadirSel){ alert('Pilih konfirmasi kehadiran terlebih dahulu.'); return; }
   saveConfirm(rec=>{
     rec.keterlibatanPanitia = panitiaSel ? panitiaSel.dataset.val : 'Tidak';
     rec.hadirOrtu = hadirSel.dataset.val; // 'Ayah' | 'Ibu' | 'Tidak'
-  });
+  }, e.target);
 });
-document.getElementById('submitGuruConfirm').addEventListener('click', ()=>{
+document.getElementById('submitGuruConfirm').addEventListener('click', (e)=>{
   const sel = document.querySelector('#hadirGuruGroup .radio-pill.active');
   if(!sel){ alert('Pilih konfirmasi kehadiran terlebih dahulu.'); return; }
-  saveConfirm(rec=>{ rec.hadirGuru = sel.dataset.val; });
+  saveConfirm(rec=>{ rec.hadirGuru = sel.dataset.val; }, e.target);
 });
-document.getElementById('submitKomiteConfirm').addEventListener('click', ()=>{
+document.getElementById('submitKomiteConfirm').addEventListener('click', (e)=>{
   const sel = document.querySelector('#hadirKomiteGroup .radio-pill.active');
   if(!sel){ alert('Pilih konfirmasi kehadiran terlebih dahulu.'); return; }
-  saveConfirm(rec=>{ rec.hadirKomite = sel.dataset.val; });
+  saveConfirm(rec=>{ rec.hadirKomite = sel.dataset.val; }, e.target);
 });
 
 /* ---------- ADMIN NAV ---------- */
